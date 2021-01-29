@@ -44,9 +44,7 @@ describe('init', () => {
 
     const packageJson = readJsonInTree(tree, 'package.json');
 
-    expect(packageJson.scripts.postinstall).toEqual(
-      'ngcc --properties es2015 browser module main --first-only --create-ivy-entry-points'
-    );
+    expect(packageJson.scripts.postinstall).toEqual('ngcc');
   });
 
   describe('--unit-test-runner', () => {
