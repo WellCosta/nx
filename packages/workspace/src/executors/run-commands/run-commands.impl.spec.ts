@@ -140,6 +140,49 @@ describe('Command Runner Builder', () => {
     expect(contents).toContain(2);
   });
 
+  describe('maxParallel', () => {
+    it('should error when parallel = false', async () => {
+      try {
+        await runCommands({
+          commands: [{ command: 'some command' }],
+          parallel: false,
+          maxParallel: 3,
+        });
+        fail('should throw');
+      } catch (e) {
+        expect(e.message).toEqual(
+          `ERROR: Bad builder config for @nrwl/run-commands - "maxParallel" can only be used when parallel=true`
+        );
+      }
+    });
+    it('should run batched commands in parallel when maxParallel is set', async (done) => {
+      const f = fileSync().name;
+      const resultPromise = runCommands({
+        commands: [
+          `echo 1 >> ${f} && sleep 0.5`,
+          `echo 1 >> ${f} && sleep 0.5`,
+          `echo 1 >> ${f} && sleep 0.5`,
+          `echo 1 >> ${f} && sleep 0.5`,
+        ],
+        parallel: true,
+        maxParallel: 2,
+      });
+
+      setTimeout(() => {
+        expect(readFile(f)).toEqual('11');
+      }, 400);
+
+      setTimeout(() => {
+        expect(readFile(f)).toEqual('1111');
+        done();
+      }, 600);
+
+      const result = await resultPromise;
+
+      expect(result).toEqual(jasmine.objectContaining({ success: true }));
+    });
+  });
+
   describe('readyWhen', () => {
     it('should error when parallel = false', async () => {
       try {

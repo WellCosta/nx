@@ -3,6 +3,110 @@ import * as yargsParser from 'yargs-parser';
 
 export const LARGE_BUFFER = 1024 * 1000000;
 
+interface Params<T, R> {
+  /**
+   * The input collection that will feed the tasks
+   */
+  collection: T[];
+  /**
+   * A function that takes an item from the collection and returns a result
+   */
+  task: (t: T, index: number) => Promise<R>;
+  /**
+   * The max number of concurrent tasks. If not provided, all tasks are ran at
+   * once
+   */
+  maxConcurrency?: number;
+}
+
+/**
+ * Like `Promise.all` but you can specify how many concurrent tasks you want at once.
+ */
+async function pool<T, R>({
+  collection,
+  task,
+  maxConcurrency,
+}: Params<T, R>): Promise<R[]> {
+  if (!maxConcurrency) {
+    return Promise.all(collection.map((item, i) => task(item, i)));
+  }
+
+  if (!collection.length) {
+    return [];
+  }
+
+  const results: Array<[R, number]> = [];
+  const mutableCollection = collection
+    .slice()
+    .map((t, i) => [t, i] as [T, number]);
+
+  let available = maxConcurrency;
+  let done = false;
+  let globalResolve!: () => void;
+  let globalReject!: (err: Error) => void;
+  const finalPromise = new Promise<void>((resolve, reject) => {
+    globalResolve = resolve;
+    globalReject = reject;
+  });
+
+  const listeners = new Set<() => void>();
+  function notify() {
+    for (const listener of listeners) {
+      listener();
+    }
+  }
+  function ready() {
+    return new Promise<void>((resolve) => {
+      const listener = () => {
+        if (done) {
+          listeners.delete(listener);
+          resolve();
+        } else if (available > 0) {
+          listeners.delete(listener);
+          available -= 1;
+          resolve();
+        }
+      };
+
+      listeners.add(listener);
+      notify();
+    });
+  }
+
+  while (true) {
+    const value = mutableCollection.shift();
+    if (!value) break;
+    if (done) break;
+
+    const [t, i] = value;
+
+    await ready();
+
+    task(t, i)
+      .then((r) => {
+        results.push([r, i]);
+        available += 1;
+
+        if (results.length === collection.length) {
+          done = true;
+          globalResolve();
+        }
+      })
+      .catch((e) => {
+        done = true;
+        globalReject(e);
+      })
+      .finally(notify);
+  }
+
+  await finalPromise;
+
+  return results
+    .slice()
+    .sort(([, a], [, b]) => a - b)
+    .map(([r]) => r);
+}
+
 function loadEnvVars(path?: string) {
   if (path) {
     const result = require('dotenv').config({ path });
@@ -28,6 +132,7 @@ export interface RunCommandsBuilderOptions extends Json {
   )[];
   color?: boolean;
   parallel?: boolean;
+  maxParallel?: number;
   readyWhen?: string;
   cwd?: string;
   args?: string;
@@ -40,6 +145,7 @@ const propKeys = [
   'commands',
   'color',
   'parallel',
+  'maxParallel',
   'readyWhen',
   'cwd',
   'args',
@@ -68,6 +174,12 @@ export default async function (
     );
   }
 
+  if (options.maxParallel && !options.parallel) {
+    throw new Error(
+      'ERROR: Bad builder config for @nrwl/run-commands - "maxParallel" can only be used when parallel=true'
+    );
+  }
+
   try {
     const success = options.parallel
       ? await runInParallel(normalized)
@@ -81,19 +193,18 @@ export default async function (
 }
 
 async function runInParallel(options: NormalizedRunCommandsBuilderOptions) {
-  const procs = options.commands.map((c) =>
-    createProcess(
-      c.command,
-      options.readyWhen,
-      options.color,
-      options.cwd
-    ).then((result) => ({
-      result,
-      command: c.command,
-    }))
-  );
-
   if (options.readyWhen) {
+    const procs = options.commands.map((c) =>
+      createProcess(
+        c.command,
+        options.readyWhen,
+        options.color,
+        options.cwd
+      ).then((result) => ({
+        result,
+        command: c.command,
+      }))
+    );
     const r = await Promise.race(procs);
     if (!r.result) {
       process.stderr.write(
@@ -104,7 +215,20 @@ async function runInParallel(options: NormalizedRunCommandsBuilderOptions) {
       return true;
     }
   } else {
-    const r = await Promise.all(procs);
+    const r = await pool({
+      collection: options.commands,
+      maxConcurrency: options.maxParallel,
+      task: async (c: { command: string; forwardAllArgs?: boolean }) =>
+        createProcess(
+          c.command,
+          options.readyWhen,
+          options.color,
+          options.cwd
+        ).then((result) => ({
+          result,
+          command: c.command,
+        })),
+    });
     const failed = r.filter((v) => !v.result);
     if (failed.length > 0) {
       failed.forEach((f) => {
